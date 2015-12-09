@@ -1,0 +1,158 @@
+# -*- coding: utf-8 -*-
+"""
+Created on Sat Jul 25 02:16:14 2015
+
+@author: zjc,clover_jfuwang
+"""
+
+import numpy as np
+from sklearn.cluster import DBSCAN
+from numpy import transpose
+import csv
+from numpy import *
+#from sklearn.cluster import KMeans
+from operator import itemgetter
+import time
+from multiprocessing import Pool
+based_eps=0.0006 #聚类基准距离
+base = 5 #对数函数底数
+processingNum = 10
+'''dbscan聚类函数'''
+def dbscan(X,eps,min_samples):
+    #公交轨迹
+    db = DBSCAN(eps, min_samples).fits(X)
+    core_samples_mask = np.zeros_like(db.labels_, dtype=bool)#初始化矩阵，返回一个输入数组的形状和类型
+    core_samples_mask[db.core_sample_indices_] = True #标签为1的定义为true
+    labels = db.labels_
+    print labels,len(set(labels))
+    n_clusters_ = len(set(labels)) - (1 if -1 in labels else 0)
+    return labels,n_clusters_
+
+'''获取聚类中心'''    
+def gpscents(X,labels):
+    centroids = []
+    unique_labels = set(labels)
+    for k in zip(unique_labels):
+        if k == (-1.0,):
+            # Black used for noise.
+            continue
+        class_member_mask = (labels == k)#这个能相等吗？
+        xy = X[class_member_mask]
+        centroids.append([mean(xy[:,0]),mean(xy[:,1])])
+    return centroids
+
+'''多进程函数'''
+def cluster_fun(data):
+    filel = open('BUSSTOPS_ROUTEID_LIST.csv', 'a')
+    n = 0
+    routeid_mask = (route_gps == data)#获取某一条路线的所有下标
+    #print routeid_mask
+    newroute =' '.join(data)
+    newgps = gps[routeid_mask]#获得对应routeid新的gps数据
+    print('routeid:',newroute )
+    #cents_time=[]
+    busid_gps = []
+    day_gps = []
+    #time_gps=[]
+    bus_lng_gps = []
+    bus_lat_gps = []
+    diraction_gps = []
+    diraction = 1#定义方向标签
+    newgps = sorted(newgps, key=itemgetter(0,1,2))#把gps数据按照bus，day，time排序，为判断行车方向用
+    for i in xrange (len(newgps)):
+        busid_gps.append(newgps[i][0])#公交车车标识
+        day_gps.append(int(newgps[i][1]))#处理日期
+        bus_lng_gps.append(float(newgps[i][3]))#GPS经纬度
+        bus_lat_gps.append(float(newgps[i][4]))
+        diraction_gps.append(diraction)
+        if float(newgps[i][2]) - float(newgps[i-1][2]) >= 1500 :#定义超过25分钟则行车方向改变
+            diraction = -diraction
+    #del(busid[j])
+    diraction_array = array(diraction_gps)
+    n_day_bus = len(set(busid_gps)) + len(set(day_gps))#天数
+    X=transpose([bus_lng_gps,bus_lat_gps])  #busid的经纬度
+    print X[0],len(X)
+    X1=X[diraction_array == 1]
+    X2=X[diraction_array == -1]
+    print X1[0],X2[0],len(X1),len(X2)
+    eps = based_eps*(1.0/math.log(1+n_day_bus,base))#聚类最小间距
+    min_samples = int(n_day_bus*(math.log(1+n_day_bus,base)))#聚类最少点数
+    labels1,n_clusters1_ = dbscan(X1,eps,min_samples)
+    labels2,n_clusters2_ = dbscan(X2,eps,min_samples)
+    print('Estimated number of clusters1: %d' % n_clusters1_)
+    print('Estimated number of clusters2: %d' % n_clusters2_)
+    
+    centroids1 = gpscents(X1,labels1)
+    centroids2 = gpscents(X2,labels2)
+    sequence1=0
+    sequence2=0
+    for i in xrange(len(centroids1)):
+        n=n+1
+        sequence1=sequence1+1
+        filel.write(str(n)+','+newroute+','+str(0)+','+str(sequence1)+','+str(centroids1[i][0])+','+str(centroids1[i][1]))
+        filel.write('\n')
+    for j in xrange(len(centroids2)):
+        n=n+1
+        sequence2=sequence2+1
+        filel.write(str(n)+','+newroute+','+str(1)+','+str(sequence2)+','+str(centroids2[j][0])+','+str(centroids2[j][1]))
+        filel.write('\n')
+    filel.close()
+    time2=time.time()
+    print "takes",time3-time2,"sec"
+
+
+###################读取数据#################
+time1 = time.time()
+busfile = file('/home/public/data/BUS_ROUTE_DIC.csv', 'rb')#Bus_id-Route_id Dictionary  /home/public/data/GPS_DATA.csv
+busfile.next()
+busf = csv.reader(busfile)
+bus_routeid = dict()
+for row in busf:
+    bus_routeid.setdefault(row[0],row[1])
+print 'finish busid_routeid'
+
+gpsfile = file('/home/public/data/GPS_DATA.csv', 'rb')#Description of Bus GPS Data /home/public/data/GPS_DATA.csv
+gpsfile.next()
+gpsf = csv.reader(gpsfile)
+gps = []
+route_gps = []
+#gps_busid=[]
+time1 = time.time()
+for row in gpsf:
+    try:
+        day = int(row[1])
+        times = int(row[2])
+    except:
+        continue
+    if times >= 36000 and times <= 61200:
+        try:
+            route_gps.append(bus_routeid[row[0]])
+            gps.append(row)
+        except:
+            continue
+print 'finish gps'
+time2 = time.time()
+print "load gps data takes:",time2-time1,"sec"
+#gps=sorted(gps, key=itemgetter(0,1,2))
+unique_routeid = set(route_gps)
+route_gps = array(route_gps)
+gps = array(gps)#
+print 'finish read data'
+    
+time3 = time.time()
+print len(unique_routeid)
+filel = open('BUSSTOPS_ROUTEID_LIST.csv', 'w')
+filel.close()
+data = list()
+for route in zip(unique_routeid):
+    data.append(route)
+pool = Pool(processingNum)
+try:
+    pool.imap(cluster_fun,data)
+except Exception,e:
+    print e
+finally:
+    pool.close()	
+    pool.join()
+
+
