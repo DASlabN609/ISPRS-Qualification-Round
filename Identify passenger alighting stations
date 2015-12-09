@@ -1,0 +1,261 @@
+# -*- coding: utf-8 -*-
+"""
+Created on Fri Jul 31 09:02:23 2015
+
+@author: clover
+"""
+
+import csv
+import time
+route_stop = dict()#保存线路上的站点信息
+bus_route = dict()#bus和route的对应关系
+#card_guid_bus_time = dict()
+gps_data = dict()#gps数据
+card_guid_bus_time_list_multi_record = list()#有多条刷卡记录的card
+card_guid_bus_time_list_one_record = list()#只有一条刷卡记录的card
+multi_record_user_stop = dict()#
+search_count = 25#二分查找的最大次数
+def load_ACF_data(filename):
+    card_guid_bus_time = dict()#保存一张card下的guid，bus，time信息
+    with open(filename) as f:
+        f.next()#跳过第一行的title数据
+        reader = csv.reader(f)
+        for row in reader:
+            row[1] = int(row[1])
+            row[2] = int(row[2])
+            row[3] = int(row[3])
+            card_guid_bus_time.setdefault(row[1],dict())
+            card_guid_bus_time[row[1]].setdefault(row[2],dict())
+            card_guid_bus_time[row[1]][row[2]][row[0]+"-"+row[4]]=row[3]
+
+    for key,value in card_guid_bus_time.items():
+        if len(value) == 1 and len(value.values()) == 1:#一张卡只有一天的记录，且一天中只有一条记录
+            card_guid_bus_time_list_one_record.append(value)
+        elif len(value) > 1 or len(value.values()) > 1:#一张卡有多天记录或一天中有多条记录
+            card_guid_bus_time_list_multi_record.append(value)#添加超过一条记录的card
+
+'''读取task1预测的每条route的站点信息'''
+def load_route_stop(filename):
+    with open(filename) as f:
+        reader = csv.reader(f)
+        for row in reader:
+            row[1] = int(row[1])#route_id
+            row[4] = round(float(row[4]),6)#经度
+            row[5] = round(float(row[5]),6)#维度
+            route_stop.setdefault(row[1],list())
+            route_stop[row[1]].append((row[4],row[5]))
+
+'''读取bus和route映射关系数据'''
+def load_bus_route_dic(filename):
+    with open(filename) as f:
+        f.next()
+        reader = csv.reader(f)
+        for row in reader:
+            bus_route.setdefault(int(row[0]),int(row[1]))
+'''读取gsp数据'''
+def load_gsp_data(filename):
+    with open(filename) as f:
+        f.next()
+        reader = csv.reader(f)
+        for row in reader:
+            if int(row[2]) > 18000:#只读入凌晨5点以后的gps数据
+                row[0] = int(row[0])
+                row[1] = int(row[1])
+                gps_data.setdefault(row[0],dict())#key=bus_id
+                gps_data[row[0]].setdefault(row[1],list())#key=day
+                gps_data[row[0]][row[1]].append([int(row[2]),round(float(row[3]),6),round(float(row[4]),6)])
+    for key,values in gps_data.items():
+        for key,values in values.items():
+            values.sort()#对gps数据按时间排序，方便二分查找
+
+def stop_predict_multi(day_guid_busid_time):
+    one_record = dict()#用于暂存一天中只有一条记录的card的数据
+    mulit_record_result = list()#用于暂存一天中有多天记录的预测下车站点结果
+    for day,guid_busid_time in day_guid_busid_time.items():
+        guid_num = len(guid_busid_time)#判断一天中的刷卡记录
+        if guid_num == 1:
+            one_record[day] = guid_busid_time#对于有多条记录，但一天中只有一条记录的数据，暂存到列表
+        elif guid_num > 1:#一天中有多条
+            guid_stop_list = list()#用于暂存当天预测的下车站点
+            for guid_busid,card_time in sorted(guid_busid_time.items(),key = lambda x : x[1]):#对一天中的刷卡时间排序
+                row=guid_busid.split("-")
+                guid = int(row[0])
+                busid = int(row[1])
+                xlabel = 0
+                ylabel = 0
+                xlabel_list = list()
+                ylabel_list = list()
+                route=0
+                try:
+                    gps_time = gps_data[busid][day]#获取刷卡记录对应的bus和日期的gps数据
+                except:
+                    continue 
+                set_num = len (gps_time)#刷卡的这辆bus在当天中上报的gps数量
+                low_time = card_time-60#刷卡前60s
+                high_time = card_time + 60#刷卡后60s
+                mid_index = set_num/2
+                index = set_num/2
+                diff = mid_index
+                '''查找刷卡时间点前60s内的gps点'''
+                for i in range(search_count):
+                    if  diff < 1:#在时间范围内没有找到gps点，查找结束，赋值最近时间的gps点
+                        xlabel_list.append(round(float(gps_time[index][1]),6))
+                        ylabel_list.append(round(float(gps_time[index][2]),6))
+                        break
+                    times = gps_time[index][0]
+                    diff = diff/2
+                    if times >= low_time and  times <= card_time:#在设定范围内找到gps数据，停止查找，并赋值gps数据
+                        xlabel_list.append(round(float(gps_time[index][1]),6))
+                        ylabel_list.append(round(float(gps_time[index][2]),6))
+                        break
+                    elif times < low_time:#gps时间比设定的时间范围的下限要小，把gps时间加上diff，继续查找
+                        index = index + diff
+                    elif times > card_time:#gps时间比设定的时间范围的上限要大，把gps时间减去diff，继续查找
+                        index = index - diff
+                '''查找刷卡时间点后60s内的gps点'''
+                index = set_num/2
+                diff = mid_index
+                for i in range(search_count):
+                    if  diff < 1:
+                        xlabel_list.append(round(float(gps_time[index][1]),6))
+                        ylabel_list.append(round(float(gps_time[index][2]),6))
+                        break
+                    times = gps_time[index][0]
+                    diff = diff/2
+                    if times >= card_time and  times <= high_time:
+                        xlabel_list.append(round(float(gps_time[index][1]),6))
+                        ylabel_list.append(round(float(gps_time[index][2]),6))
+                        break
+                    elif times < card_time:
+                        index = index + diff
+                    elif times > high_time:
+                        index = index - diff
+                if len(xlabel_list) > 0:
+                    xlabel = sum(xlabel_list)/len(xlabel_list)
+                    ylabel = sum(ylabel_list)/len(xlabel_list)
+                else: 
+                    continue
+                route = bus_route[busid]
+                disMin = 100000#初始化最小距离
+                stop_x = 0
+                stop_y = 0
+                '''在线路上找出最有可能的刷卡站点'''
+                for xy in route_stop[route]:
+                    distinct = abs(xy[0] - xlabel) + abs(xy[1] - ylabel)#为简化计算，用Cityblock distance代替欧式距离
+                    if distinct < disMin:
+                        disMin = distinct
+                        stop_x = xy[0]
+                        stop_y = xy[1]
+                guid_stop_list.append(str(guid)+','+str(stop_x)+','+str(stop_y))#暂存每次刷卡的上车站点
+            with open('result_1.csv','a') as f:
+                stop_num = len(guid_stop_list)
+                '''按照时间顺序和闭环规则推算每次刷卡最有可能的下车站点'''
+                for i in range(stop_num):
+                    if (i+1) < stop_num:
+                        row1 = guid_stop_list[i].split(',')
+                        row2 = guid_stop_list[i+1].split(',')
+                    else:
+                        row1 = guid_stop_list[i].split(',')
+                        row2 = guid_stop_list[0].split(',')
+                    '''暂存一天中有多条记录的上车站点和对应的预测下车站点，作为后续预测一天只有一条记录的预测依据'''
+                    mulit_record_result.append((round(float(row1[1]),6),round(float(row1[2]),6),round(float(row2[1]),6),round(float(row2[2]),6)))#上车点，下车点
+                    f.write(row1[0]+','+row2[1]+','+row2[2])
+                    f.write("\n")
+            guid_stop_list=list()#重新定义变量，释放内存
+            
+    '''重新处理一天只有一条记录的card'''
+    xlabel = 0
+    ylabel = 0
+    xlabel_list = list()
+    ylabel_list = list()
+    for day,guid_busid_times in one_record.items():
+        guid = int(guid_busid_times.keys()[0].split('-')[0])
+        busid = int(guid_busid_times.keys()[0].split("-")[1])
+        card_time = int(guid_busid_times.values()[0])
+        try:
+            gps_time=gps_data[busid][day]
+        except:
+            continue
+        set_num = len (gps_time)
+        low_time = card_time - 60
+        high_time = card_time + 60
+        mid_index = set_num/2
+        index = set_num/2
+        diff = mid_index
+        for i in range(search_count):
+            if  diff < 1:
+                xlabel_list.append(gps_time[index][1])
+                ylabel_list.append(gps_time[index][2])
+                break
+            times = gps_time[index][0]
+            diff = diff/2
+            if times >= low_time and times <= card_time:
+                xlabel_list.append(gps_time[index][1])
+                ylabel_list.append(gps_time[index][2])
+                break
+            elif times < low_time:
+                index = index + diff
+            elif times > card_time:
+                index = index - diff
+        index = set_num/2
+        diff = mid_index
+        for i in range(search_count):
+            if  diff < 1:
+                xlabel_list.append(gps_time[index][1])
+                ylabel_list.append(gps_time[index][2])
+                break
+            times = gps_time[index][0]
+            diff = diff/2
+            if times >= card_time and times <= high_time:
+                xlabel_list.append(gps_time[index][1])
+                ylabel_list.append(gps_time[index][2])
+                break
+            elif times < card_time:
+                index = index + diff
+            elif times > high_time:
+                index = index - diff
+        if len(xlabel_list)>0:
+            xlabel = sum(xlabel_list)/len(xlabel_list)
+            ylabel = sum(ylabel_list)/len(xlabel_list)
+        else: 
+            continue                
+        disMin = 10000
+        stop_x = 0
+        stop_y = 0
+        for xy in mulit_record_result:
+            distinct = abs(xy[0] - xlabel) + abs(xy[1] - ylabel)
+            if distinct < disMin:
+                disMin = distinct
+                stop_x = xy[2]
+                stop_y = xy[3]
+        with open('result_2.csv','a') as ff:
+           ff.write(str(guid)+','+str(stop_x)+','+str(stop_y))
+           ff.write("\n")
+    one_record = dict()#重新定义变量，释放内存
+    mulit_record_result = list()#重新定义变量，释放内存
+
+def main():
+    time1=time.time()
+    load_ACF_data("AFC_DATA_SAMPLE.csv")
+    print "Load AFC data success"
+    load_route_stop("TRAINING_BUSSTOPS_ROUTEID_LIST.csv")#task1预测的结果
+    print "Load route_stop data success "
+    load_bus_route_dic("BUS_ROUTE_DIC.csv")
+    print "Load bus_route data success"
+    load_gsp_data("GPS_DATA_SAMPLE.csv")
+    print "Load gps data success "
+    f = open('result_1.csv','w')
+    f.close()
+    f = open('result_2.csv','w')
+    f.close()
+    '''预测有多条记录的card''' 
+    for i in card_guid_bus_time_list_multi_record:
+        stop_predict_multi(i)
+    '''清空数据，释放内存'''
+    route_stop.clear()
+    bus_route.clear()
+    gps_data.clear()
+    time2=time.time()
+    print "Predict takes time",time2-time1,'sec'
+if __name__==main():
+    main()
